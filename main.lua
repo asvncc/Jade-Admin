@@ -62,6 +62,12 @@ local state = {
         mobileButton = nil,
         mobileButtonConn = nil,
     },
+    spin = {
+        enabled = false,
+        speed = 20,
+        bav = nil,
+        charConn = nil
+    },
     noclip = {
         enabled = false,
         conn = nil,
@@ -785,6 +791,70 @@ if not UserInputService.TouchEnabled then
     end)
 end
 
+local function enableSpin(speed)
+    if state.spin.bav and state.spin.bav.Parent then
+        safe_pcall(function() state.spin.bav:Destroy() end)
+    end
+    state.spin.enabled = true
+    state.spin.speed = tonumber(speed) or state.spin.speed or 20
+    
+    local char = LocalPlayer.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local bav = Instance.new("BodyAngularVelocity")
+            bav.Name = "JadeAdmin_Spin"
+            bav.MaxTorque = Vector3.new(0, math.huge, 0)
+            bav.AngularVelocity = Vector3.new(0, state.spin.speed, 0)
+            bav.Parent = hrp
+            state.spin.bav = bav
+        end
+    end
+
+    if not state.spin.charConn then
+        state.spin.charConn = LocalPlayer.CharacterAdded:Connect(function(c)
+            delay(0.1, function()
+                if state.spin.enabled then
+                    enableSpin(state.spin.speed)
+                end
+            end)
+        end)
+    end
+    setStatus("Spin enabled. Speed: " .. tostring(state.spin.speed), true)
+end
+
+local function disableSpin()
+    state.spin.enabled = false
+    if state.spin.bav and state.spin.bav.Parent then
+        safe_pcall(function() state.spin.bav:Destroy() end)
+    end
+    state.spin.bav = nil
+    if state.spin.charConn and typeof(state.spin.charConn) == "RBXScriptConnection" then
+        safe_pcall(function() state.spin.charConn:Disconnect() end)
+    end
+    state.spin.charConn = nil
+    setStatus("Spin disabled.", true)
+end
+
+local function toggleSpin(arg)
+    local a = tostring(arg or "")
+    if a == "" then
+        if state.spin.enabled then disableSpin() else enableSpin() end
+        return
+    end
+    local la = string.lower(a)
+    if la == "off" or la == "false" then
+        disableSpin()
+        return
+    end
+    local n = tonumber(a)
+    if n then
+        enableSpin(n)
+        return
+    end
+    enableSpin()
+end
+
 local function tryHttpGet(url)
     local ok, res, body
     ok, body = pcall(function()
@@ -1127,6 +1197,10 @@ local function processCommandString(commandString)
         toggleFly(arg)
     elseif lc == "unfly" then
         disableFly()
+    elseif lc == "spin" then
+        toggleSpin(arg)
+    elseif lc == "unspin" then
+        disableSpin()
     elseif lc == "noclip" then
         toggleNoclip(arg)
     elseif lc == "clip" then
@@ -1157,7 +1231,7 @@ local function chatHandler(msg)
                 bringparts=true, unbringparts=true, fly=true, unfly=true,
                 rejoin=true, serverhop=true, shop=true, respawn=true, re=true,
                 walkspeed=true, jumppower=true, goto=true, noclip=true, clip=true,
-                infinitejump=true, infjump=true
+                infinitejump=true, infjump=true, spin=true, unspin=true
             }
             if known[lc] then
                 processCommandString(msg)
@@ -1193,6 +1267,11 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     if state.infiniteJump.enabled then
         delay(0.1, function()
             enableInfiniteJump(state.infiniteJump.power)
+        end)
+    end
+    if state.spin.enabled then
+        delay(0.1, function()
+            enableSpin(state.spin.speed)
         end)
     end
 end)
