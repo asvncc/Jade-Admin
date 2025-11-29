@@ -15,6 +15,8 @@
 - `!goto <player name>`: Teleport to another player’s location in the game.
 - `!bringparts <player name>`: Attach and fling parts to the specified player.
 - `!unbringparts`: Stop flinging parts and reset everything.
+- `!spin`: Makes your character spin.
+- `!unspin`: Makes your character stop spinning.
 
 ---
 
