@@ -1,3 +1,6 @@
+if getgenv().LoopFlingLoaded then return end
+getgenv().LoopFlingLoaded = true
+
 local Players = game:GetService("Players")
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
@@ -391,6 +394,7 @@ end)
 CloseButton.MouseButton1Click:Connect(function()
     StopLoopFling()
     LoopFlingGUI:Destroy()
+    getgenv().LoopFlingLoaded = false
 end)
 
 respawnConnection = Player.CharacterAdded:Connect(function()
