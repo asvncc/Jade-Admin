@@ -17,6 +17,7 @@
 - `!unbringparts`: Stop flinging parts and reset everything.
 - `!spin`: Makes your character spin.
 - `!unspin`: Makes your character stop spinning.
+- `!re` / `!refresh`: Refreshes your character
 
 ---
 
