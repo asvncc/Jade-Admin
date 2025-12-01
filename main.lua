@@ -1,6 +1,5 @@
 if getgenv()._JADE_ADMIN_LOADED then return end
 getgenv()._JADE_ADMIN_LOADED = true
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
@@ -11,9 +10,6 @@ local LocalPlayer = Players.LocalPlayer
 
 local function safe_pcall(f, ...)
     local ok, res = pcall(f, ...)
-    if not ok then
-        warn("[Jade Admin] Error:", res)
-    end
     return ok, res
 end
 
@@ -55,6 +51,7 @@ local state = {
         inputBegan = nil,
         inputEnded = nil,
         renderConn = nil,
+        stateFixConn = nil,
         charConn = nil,
         keys = {},
         toggleKeyConn = nil,
@@ -79,9 +76,18 @@ local state = {
         origJumpPower = nil,
         charConn = nil,
     },
+    view = {
+        enabled = false,
+        targetPlayer = nil,
+    },
     walkSpeed = nil,
     jumpPower = nil,
+    originalTransparencies = {} 
 }
+
+local enableFly
+local disableFly
+local toggleFly
 
 local function disconnectAll()
     for _, conn in pairs(state.connections) do
@@ -102,6 +108,7 @@ local function disconnectCharConnections()
 end
 
 local function cleanupFolderAndPart()
+    if state.part then safe_pcall(function() state.part.Transparency = 1 end) end 
     if state.folder then safe_pcall(function() state.folder:Destroy() end) end
     state.folder = nil
     state.part = nil
@@ -127,7 +134,6 @@ local function setupFolderAndPart()
     state.part = Part
     state.att1 = Attachment1
 end
-
 setupFolderAndPart()
 
 if not getgenv().Network then
@@ -180,8 +186,16 @@ local function isSafeTargetPart(v)
     return true
 end
 
+local function isLocalCharacterPart(v)
+    local char = LocalPlayer.Character
+    return char and v:IsDescendantOf(char)
+end
+
 local function ForcePart(v)
     if not isSafeTargetPart(v) then return end
+    
+    if isLocalCharacterPart(v) then return end
+    
     safe_pcall(function()
         for _, x in ipairs(v:GetChildren()) do
             if x:IsA("BodyMover") or x:IsA("RocketPropulsion") then
@@ -251,14 +265,6 @@ local function getPlayer(name)
     return nil
 end
 
-local function setStatus(txt, ok)
-    if ok then
-        print("[Jade Admin] " .. (txt or ""))
-    else
-        warn("[Jade Admin] " .. (txt or ""))
-    end
-end
-
 local function findAnyCharacterPart(char)
     if not char then return nil end
     local candidates = { "HumanoidRootPart", "LowerTorso", "Torso", "UpperTorso", "Head" }
@@ -310,18 +316,13 @@ local function attachToCharacter(char)
         state.humanoidRootPart = findAnyCharacterPart(char)
     end
     applyWalkJumpToChar(char)
-    if state.blackHoleActive then
-        setStatus("Attached to " .. (state.player and state.player.Name or "target") .. "'s character.", true)
-    end
     local descAddedConn = char.DescendantAdded:Connect(function(desc)
         if not state.character then return end
         if desc and desc:IsA("BasePart") then
             if desc.Name == "HumanoidRootPart" then
                 state.humanoidRootPart = desc
-                setStatus("HumanoidRootPart detected.", true)
             elseif not state.humanoidRootPart then
                 state.humanoidRootPart = desc
-                setStatus("Found new body part to attach.", true)
             end
         end
     end)
@@ -330,18 +331,12 @@ local function attachToCharacter(char)
         if child == state.humanoidRootPart then
             local fallback = findAnyCharacterPart(char)
             state.humanoidRootPart = fallback
-            if fallback then
-                setStatus("HumanoidRootPart removed — switched to fallback.", true)
-            else
-                setStatus("HumanoidRootPart removed — waiting for new parts.", false)
-            end
         end
     end)
     table.insert(state.charConnections, childRemovedConn)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum and hum:IsA("Humanoid") then
         local diedConn = hum.Died:Connect(function()
-            setStatus("Target died — searching for new body part.", true)
             delay(0.15, function()
                 local fallback = findAnyCharacterPart(char)
                 state.humanoidRootPart = fallback
@@ -352,7 +347,6 @@ local function attachToCharacter(char)
         local humAdded = char.ChildAdded:Connect(function(child)
             if child and child:IsA("Humanoid") and not child.Parent == nil then
                 local diedConn2 = child.Died:Connect(function()
-                    setStatus("Target died — searching for new body part.", true)
                     delay(0.15, function()
                         local fallback = findAnyCharacterPart(char)
                         state.humanoidRootPart = fallback
@@ -369,52 +363,80 @@ end
 local function stopFlinging()
     state.flingActive = false
     disconnectAll()
-    setStatus("Flinging stopped.", true)
+end
+
+local function setAllPartsVisibility(visible)
+    state.originalTransparencies = {}
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("BasePart") then
+            safe_pcall(function()
+                if visible then
+                    if state.originalTransparencies[v] ~= nil then
+                        v.Transparency = state.originalTransparencies[v]
+                        state.originalTransparencies[v] = nil
+                    else
+                        v.Transparency = 0 
+                    end
+                else
+                    if isSafeTargetPart(v) or isLocalCharacterPart(v) then
+                        state.originalTransparencies[v] = v.Transparency
+                        v.Transparency = 1
+                    end
+                end
+            end)
+        end
+    end
+    if visible then
+        state.originalTransparencies = {}
+    end
 end
 
 local function startFlinging()
     if not state.character or not state.att1 then
-        setStatus("No character/attachment ready! Wait for respawn.", false)
         return
     end
     if not state.humanoidRootPart or not state.humanoidRootPart:IsDescendantOf(state.character) then
         local fallback = findAnyCharacterPart(state.character)
         if fallback then
             state.humanoidRootPart = fallback
-        else
-            setStatus("No body part found to attach to.", false)
         end
     end
+    
+    setAllPartsVisibility(false) 
+
     state.flingActive = true
     for _, v in ipairs(Workspace:GetDescendants()) do
         ForcePart(v)
     end
+    
+    if state.flingActive then 
+        setAllPartsVisibility(true)
+    end
+
+
     table.insert(state.connections, Workspace.DescendantAdded:Connect(function(v)
         if state.flingActive then ForcePart(v) end
     end))
     table.insert(state.connections, RunService.RenderStepped:Connect(function()
         if state.flingActive and state.att1 then
-            safe_pcall(function()
-                if (not state.humanoidRootPart) or (state.character and not state.humanoidRootPart:IsDescendantOf(state.character)) then
-                    if state.player then
-                        local curChar = state.player.Character
-                        state.character = curChar or state.character
-                        local newPart = findAnyCharacterPart(curChar or state.character)
-                        if newPart then
-                            state.humanoidRootPart = newPart
-                        end
-                    end
+            local hrp = state.humanoidRootPart
+            if not hrp or not state.character or not hrp:IsDescendantOf(state.character) then
+                if state.player and state.player.Character then
+                    hrp = findAnyCharacterPart(state.player.Character)
+                    state.humanoidRootPart = hrp
                 end
-                if state.humanoidRootPart and state.humanoidRootPart:IsA("BasePart") then
-                    state.att1.WorldCFrame = state.humanoidRootPart.CFrame
-                end
-            end)
+            end
+            
+            if hrp and hrp:IsA("BasePart") then
+                safe_pcall(function() 
+                    state.att1.WorldCFrame = hrp.CFrame
+                end)
+            end
         end
     end))
     local hum = state.character and state.character:FindFirstChildOfClass("Humanoid")
     if hum then
         table.insert(state.connections, hum.Died:Connect(function()
-            setStatus("Target died — continuing fling.", true)
             local fallback = findAnyCharacterPart(state.character)
             if fallback then
                 state.humanoidRootPart = fallback
@@ -426,7 +448,6 @@ local function startFlinging()
     if state.player then
         table.insert(state.connections, state.player.AncestryChanged:Connect(function(_, parent)
             if not parent then
-                setStatus("Target left game.", false)
                 unbringPartsCommand()
             end
         end))
@@ -440,11 +461,26 @@ local function onCharacterSpawned()
     end
 end
 
+local function unsitPlayer()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        safe_pcall(function()
+            hum.Sit = false
+        end)
+    end
+end
+
 local function bringPartsCommand(arg)
     safe_pcall(function()
         local p
+        local targetIsLocalPlayer = false
         if typeof(arg) == "Instance" and arg:IsA("Player") then
             p = arg
+            if p == LocalPlayer then
+                targetIsLocalPlayer = true
+            end
         else
             local name = tostring(arg or "")
             if name ~= "" then
@@ -453,14 +489,23 @@ local function bringPartsCommand(arg)
                 p = nil
             end
         end
+
         if not p then
-            setStatus("Chat: no player specified/found.", false)
-            return
+            if trim(tostring(arg)) == "" then
+                p = LocalPlayer
+                targetIsLocalPlayer = true
+            else
+                return
+            end
         end
+        
+        if p == LocalPlayer then
+            targetIsLocalPlayer = true
+        end
+
         disconnectAll()
         disconnectCharConnections()
         state.player = p
-        setStatus("Chat: Player found: " .. p.Name, true)
         table.insert(state.connections, state.player.CharacterAdded:Connect(function(char)
             delay(0.05, function()
                 attachToCharacter(char)
@@ -479,10 +524,8 @@ local function bringPartsCommand(arg)
         end
         if not state.blackHoleActive then
             state.blackHoleActive = true
-            setStatus("Flinging enabled via chat.", true)
             startFlinging()
         else
-            setStatus("Switched fling target via chat.", true)
             startFlinging()
         end
     end)
@@ -505,6 +548,7 @@ local function unbringPartsCommand(arg)
                     safe_pcall(function()
                         v.AssemblyLinearVelocity = Vector3.new(0,0,0)
                         v.Velocity = Vector3.new(0,0,0)
+                        
                         v.CanCollide = true
                     end)
                     if getgenv().Network and getgenv().Network.BaseParts then
@@ -517,20 +561,13 @@ local function unbringPartsCommand(arg)
                 end
             end
         end
+        setAllPartsVisibility(true) 
         stopFlinging()
         clearCharacterState()
         cleanupFolderAndPart()
         state.player = nil
         state.blackHoleActive = false
         state.flingActive = false
-        setStatus("Flinging disabled / parts recalled.", true)
-        if not arg or trim(tostring(arg)) == "" then
-            safe_pcall(function()
-                if LocalPlayer then
-                    LocalPlayer:LoadCharacter()
-                end
-            end)
-        end
     end)
 end
 
@@ -603,10 +640,90 @@ local function autoDetectTarget()
     return mostPl
 end
 
-local function enableFly(speed)
+local function getRandomTarget()
+    local candidates = {}
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if isValidTargetPlayer(pl) then
+            table.insert(candidates, pl)
+        end
+    end
+    if #candidates > 0 then
+        local randomIndex = math.random(1, #candidates)
+        return candidates[randomIndex]
+    end
+    return nil
+end
+
+function disableFly()
+    state.fly.enabled = false
+    
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    
+    if hum and hum.Health > 0 then
+        safe_pcall(function() hum.PlatformStand = false end)
+        safe_pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true) end)
+        safe_pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Running, true) end)
+        safe_pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    end
+
+    if state.fly.inputBegan and typeof(state.fly.inputBegan) == "RBXScriptConnection" then
+        safe_pcall(function() state.fly.inputBegan:Disconnect() end)
+    end
+    if state.fly.inputEnded and typeof(state.fly.inputEnded) == "RBXScriptConnection" then
+        safe_pcall(function() state.fly.inputEnded:Disconnect() end)
+    end
+    if state.fly.renderConn and typeof(state.fly.renderConn) == "RBXScriptConnection" then
+        safe_pcall(function() state.fly.renderConn:Disconnect() end)
+    end
+    if state.fly.stateFixConn and typeof(state.fly.stateFixConn) == "RBXScriptConnection" then
+        safe_pcall(function() state.fly.stateFixConn:Disconnect() end)
+    end
+    if state.fly.charConn and typeof(state.fly.charConn) == "RBXScriptConnection" then
+        safe_pcall(function() state.fly.charConn:Disconnect() end)
+    end
+    if state.fly.bv and state.fly.bv.Parent then safe_pcall(function() state.fly.bv:Destroy() end) end
+    if state.fly.bg and state.fly.bg.Parent then safe_pcall(function() state.fly.bg:Destroy() end) end
+    state.fly.bv = nil
+    state.fly.bg = nil
+    state.fly.inputBegan = nil
+    state.fly.inputEnded = nil
+    state.fly.renderConn = nil
+    state.fly.stateFixConn = nil 
+    state.fly.charConn = nil
+    state.fly.keys = {}
+end
+
+function toggleFly(speed)
+    local a = tostring(speed or "")
+    if a == "" then
+        if state.fly.enabled then disableFly() else enableFly() end
+        return
+    end
+    local la = string.lower(a)
+    if la == "on" or la == "true" or la == "1" then
+        enableFly()
+        return
+    end
+    if la == "off" or la == "false" or la == "0" then
+        disableFly()
+        return
+    end
+    local n = tonumber(a)
+    if n then
+        if state.fly.enabled then
+            state.fly.speed = n
+        else
+            enableFly(n)
+        end
+        return
+    end
+    if state.fly.enabled then disableFly() else enableFly() end
+end
+
+function enableFly(speed)
     if state.fly.enabled then
         state.fly.speed = tonumber(speed) or state.fly.speed
-        setStatus("Fly speed set to " .. tostring(state.fly.speed), true)
         return
     end
     local char = LocalPlayer.Character
@@ -615,17 +732,25 @@ local function enableFly(speed)
         char = ok and c or nil
     end
     if not char then
-        setStatus("No character to attach fly to.", false)
         return
     end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then
-        setStatus("No HumanoidRootPart found.", false)
         return
     end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        safe_pcall(function() hum.PlatformStand = true end)
+        safe_pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false) end)
+        safe_pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Running, false) end)
+        safe_pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+    end
+    
     state.fly.enabled = true
     state.fly.speed = tonumber(speed) or state.fly.speed or 100
     state.fly.keys = {}
+    
     state.fly.bv = Instance.new("BodyVelocity")
     state.fly.bv.Parent = hrp
     state.fly.bv.MaxForce = Vector3.new(1e5,1e5,1e5)
@@ -635,6 +760,30 @@ local function enableFly(speed)
     state.fly.bg.MaxTorque = Vector3.new(1e5,1e5,1e5)
     state.fly.bg.CFrame = hrp.CFrame
 
+    if hum and not state.fly.stateFixConn then
+        state.fly.stateFixConn = RunService.RenderStepped:Connect(function()
+            if not state.fly.enabled or not hum or hum.Health <= 0 then 
+                if state.fly.stateFixConn then safe_pcall(function() state.fly.stateFixConn:Disconnect() end) end
+                state.fly.stateFixConn = nil
+                return
+            end
+            
+            safe_pcall(function()
+                if hum:GetStateEnabled(Enum.HumanoidStateType.Freefall) then
+                    hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+                end
+                if hum:GetStateEnabled(Enum.HumanoidStateType.Running) then
+                    hum:SetStateEnabled(Enum.HumanoidStateType.Running, false)
+                end
+                
+                if hum.Sit == false and hum.PlatformStand == false and hum.MoveDirection.Magnitude == 0 then
+                    hum.PlatformStand = true
+                    hum:ChangeState(Enum.HumanoidStateType.Running)
+                end
+            end)
+        end)
+    end
+    
     state.fly.inputBegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
@@ -647,7 +796,6 @@ local function enableFly(speed)
             state.fly.keys[tostring(input.KeyCode.Name)] = nil
         end
     end)
-
     state.fly.renderConn = RunService.RenderStepped:Connect(function()
         if not state.fly.enabled then return end
         local cam = Workspace.CurrentCamera
@@ -671,75 +819,19 @@ local function enableFly(speed)
         else
             moveVec = Vector3.new(0,0,0)
         end
-        pcall(function() state.fly.bv.Velocity = moveVec end)
-        pcall(function()
+        safe_pcall(function() state.fly.bv.Velocity = moveVec end)
+        safe_pcall(function()
             if state.fly.bg and hrp2 then
                 state.fly.bg.CFrame = CFrame.new(hrp2.Position, hrp2.Position + cam.CFrame.LookVector)
             end
         end)
     end)
-
     state.fly.charConn = LocalPlayer.CharacterAdded:Connect(function(char2)
         delay(0.1, function()
             if not state.fly.enabled then return end
             enableFly(state.fly.speed)
         end)
     end)
-    setStatus("Fly enabled. Use WASD + Space/LCtrl, Shift to boost.", true)
-end
-
-local function disableFly()
-    state.fly.enabled = false
-    if state.fly.inputBegan and typeof(state.fly.inputBegan) == "RBXScriptConnection" then
-        safe_pcall(function() state.fly.inputBegan:Disconnect() end)
-    end
-    if state.fly.inputEnded and typeof(state.fly.inputEnded) == "RBXScriptConnection" then
-        safe_pcall(function() state.fly.inputEnded:Disconnect() end)
-    end
-    if state.fly.renderConn and typeof(state.fly.renderConn) == "RBXScriptConnection" then
-        safe_pcall(function() state.fly.renderConn:Disconnect() end)
-    end
-    if state.fly.charConn and typeof(state.fly.charConn) == "RBXScriptConnection" then
-        safe_pcall(function() state.fly.charConn:Disconnect() end)
-    end
-    if state.fly.bv and state.fly.bv.Parent then safe_pcall(function() state.fly.bv:Destroy() end) end
-    if state.fly.bg and state.fly.bg.Parent then safe_pcall(function() state.fly.bg:Destroy() end) end
-    state.fly.bv = nil
-    state.fly.bg = nil
-    state.fly.inputBegan = nil
-    state.fly.inputEnded = nil
-    state.fly.renderConn = nil
-    state.fly.charConn = nil
-    state.fly.keys = {}
-    setStatus("Fly disabled.", true)
-end
-
-local function toggleFly(arg)
-    local a = tostring(arg or "")
-    if a == "" then
-        if state.fly.enabled then disableFly() else enableFly() end
-        return
-    end
-    local la = string.lower(a)
-    if la == "on" or la == "true" or la == "1" then
-        enableFly()
-        return
-    end
-    if la == "off" or la == "false" or la == "0" then
-        disableFly()
-        return
-    end
-    local n = tonumber(a)
-    if n then
-        if state.fly.enabled then
-            state.fly.speed = n
-            setStatus("Fly speed set to " .. tostring(n), true)
-        else
-            enableFly(n)
-        end
-        return
-    end
-    if state.fly.enabled then disableFly() else enableFly() end
 end
 
 local function createMobileToggleButton()
@@ -772,24 +864,11 @@ local function createMobileToggleButton()
     end
     if state.fly.mobileButton and not state.fly.mobileButtonConn then
         state.fly.mobileButtonConn = state.fly.mobileButton.Activated:Connect(function()
-            toggleFly()
+            toggleFly() 
         end)
     end
 end
-
 safe_pcall(function() createMobileToggleButton() end)
-
-if not UserInputService.TouchEnabled then
-    if state.fly.toggleKeyConn and typeof(state.fly.toggleKeyConn) == "RBXScriptConnection" then
-        safe_pcall(function() state.fly.toggleKeyConn:Disconnect() end)
-    end
-    state.fly.toggleKeyConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.E then
-            toggleFly()
-        end
-    end)
-end
 
 local function enableSpin(speed)
     if state.spin.bav and state.spin.bav.Parent then
@@ -797,7 +876,6 @@ local function enableSpin(speed)
     end
     state.spin.enabled = true
     state.spin.speed = tonumber(speed) or state.spin.speed or 20
-    
     local char = LocalPlayer.Character
     if char then
         local hrp = char:FindFirstChild("HumanoidRootPart")
@@ -810,7 +888,6 @@ local function enableSpin(speed)
             state.spin.bav = bav
         end
     end
-
     if not state.spin.charConn then
         state.spin.charConn = LocalPlayer.CharacterAdded:Connect(function(c)
             delay(0.1, function()
@@ -820,8 +897,7 @@ local function enableSpin(speed)
             end)
         end)
     end
-    setStatus("Spin enabled. Speed: " .. tostring(state.spin.speed), true)
-end
+end 
 
 local function disableSpin()
     state.spin.enabled = false
@@ -833,8 +909,7 @@ local function disableSpin()
         safe_pcall(function() state.spin.charConn:Disconnect() end)
     end
     state.spin.charConn = nil
-    setStatus("Spin disabled.", true)
-end
+end 
 
 local function toggleSpin(arg)
     local a = tostring(arg or "")
@@ -894,9 +969,12 @@ local function serverHop()
     safe_pcall(function()
         local placeId = tostring(game.PlaceId)
         local currentJob = tostring(game.JobId)
-        local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
+        
+        local url = "https://games.roproxy.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
+        
         local success, body = tryHttpGet(url)
         local picked = nil
+        
         if success and body then
             local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
             if ok and type(data) == "table" and data.data then
@@ -908,15 +986,18 @@ local function serverHop()
                 end
             end
         end
+        
         if picked then
             TeleportService:TeleportToPlaceInstance(game.PlaceId, picked, LocalPlayer)
             return
         end
+        
         local ok, reserved = pcall(function() return TeleportService:ReserveServer(game.PlaceId) end)
         if ok and reserved then
             TeleportService:TeleportToPlaceInstance(game.PlaceId, reserved, LocalPlayer)
             return
         end
+        
         TeleportService:Teleport(game.PlaceId, LocalPlayer)
     end)
 end
@@ -932,7 +1013,6 @@ end
 local function setWalkSpeed(value)
     value = tonumber(value)
     if not value then
-        setStatus("Invalid walkspeed value.", false)
         return
     end
     state.walkSpeed = value
@@ -943,13 +1023,11 @@ local function setWalkSpeed(value)
             safe_pcall(function() hum.WalkSpeed = state.walkSpeed end)
         end
     end
-    setStatus("WalkSpeed set to " .. tostring(state.walkSpeed), true)
 end
 
 local function setJumpPower(value)
     value = tonumber(value)
     if not value then
-        setStatus("Invalid jumppower value.", false)
         return
     end
     state.jumpPower = value
@@ -960,7 +1038,6 @@ local function setJumpPower(value)
             safe_pcall(function() hum.JumpPower = state.jumpPower end)
         end
     end
-    setStatus("JumpPower set to " .. tostring(state.jumpPower), true)
 end
 
 local function gotoPlayer(name)
@@ -969,36 +1046,29 @@ local function gotoPlayer(name)
     if trim(nm) == "" then
         p = autoDetectTarget()
         if not p then
-            setStatus("No player specified and auto-detect failed.", false)
             return
         end
     else
         p = getPlayer(nm)
         if not p then
-            setStatus("Player not found: " .. tostring(nm), false)
             return
         end
     end
     if p == LocalPlayer then
-        setStatus("Cannot goto yourself.", false)
         return
     end
     if not p.Character then
-        setStatus("Target has no character.", false)
         return
     end
     local targetPart = findAnyCharacterPart(p.Character)
     if not targetPart then
-        setStatus("Target has no usable body part.", false)
         return
     end
     if not LocalPlayer.Character then
-        setStatus("No local character to move.", false)
         return
     end
     local myPart = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or findAnyCharacterPart(LocalPlayer.Character)
     if not myPart then
-        setStatus("No local body part to move.", false)
         return
     end
     safe_pcall(function()
@@ -1006,7 +1076,6 @@ local function gotoPlayer(name)
         local upOffset = Vector3.new(0, 3, 0)
         myPart.CFrame = targetPart.CFrame + forwardOffset + upOffset
     end)
-    setStatus("Teleported to " .. p.Name, true)
 end
 
 local function tryHandleShortcutCommands(cmd, arg)
@@ -1017,7 +1086,7 @@ local function tryHandleShortcutCommands(cmd, arg)
     elseif lc == "serverhop" or lc == "shop" then
         serverHop()
         return true
-    elseif lc == "respawn" or lc == "re" then
+    elseif lc == "respawn" or lc == "re" or lc == "refresh" then
         respawnPlayer()
         return true
     elseif lc == "walkspeed" then
@@ -1026,7 +1095,7 @@ local function tryHandleShortcutCommands(cmd, arg)
     elseif lc == "jumppower" then
         setJumpPower(arg)
         return true
-    elseif lc == "goto" then
+    elseif lc == "goto" or lc == "to" then
         gotoPlayer(arg)
         return true
     end
@@ -1035,7 +1104,6 @@ end
 
 local function enableNoclip()
     if state.noclip.enabled then
-        setStatus("Noclip already enabled.", true)
         return
     end
     state.noclip.enabled = true
@@ -1044,11 +1112,10 @@ local function enableNoclip()
         if not char then return end
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") then
-                pcall(function() part.CanCollide = false end)
+                safe_pcall(function() part.CanCollide = false end)
             end
         end
     end)
-    setStatus("Noclip enabled.", true)
 end
 
 local function disableNoclip()
@@ -1061,11 +1128,10 @@ local function disableNoclip()
     if char then
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") then
-                pcall(function() part.CanCollide = true end)
+                safe_pcall(function() part.CanCollide = true end)
             end
         end
     end
-    setStatus("Noclip disabled.", true)
 end
 
 local function toggleNoclip(arg)
@@ -1089,7 +1155,6 @@ end
 local function enableInfiniteJump(power)
     if state.infiniteJump.enabled then
         state.infiniteJump.power = tonumber(power) or state.infiniteJump.power
-        setStatus("InfiniteJump power set to " .. tostring(state.infiniteJump.power), true)
         return
     end
     state.infiniteJump.enabled = true
@@ -1114,7 +1179,6 @@ local function enableInfiniteJump(power)
             enableInfiniteJump(state.infiniteJump.power)
         end)
     end)
-    setStatus("InfiniteJump enabled. Power: " .. tostring(state.infiniteJump.power), true)
 end
 
 local function disableInfiniteJump()
@@ -1141,7 +1205,6 @@ local function disableInfiniteJump()
         end
     end
     state.infiniteJump.origJumpPower = nil
-    setStatus("InfiniteJump disabled.", true)
 end
 
 local function toggleInfiniteJump(arg)
@@ -1163,7 +1226,6 @@ local function toggleInfiniteJump(arg)
     if n then
         if state.infiniteJump.enabled then
             state.infiniteJump.power = n
-            setStatus("InfiniteJump power set to " .. tostring(n), true)
         else
             enableInfiniteJump(n)
         end
@@ -1172,24 +1234,126 @@ local function toggleInfiniteJump(arg)
     if state.infiniteJump.enabled then disableInfiniteJump() else enableInfiniteJump() end
 end
 
+local function viewPlayer(name)
+    local p = getPlayer(name)
+    if not p or p == LocalPlayer or not p.Character then
+        return
+    end
+    local hum = p.Character:FindFirstChildOfClass("Humanoid")
+    if not hum then
+        return
+    end
+    safe_pcall(function()
+        Workspace.CurrentCamera.CameraSubject = hum
+        state.view.enabled = true
+        state.view.targetPlayer = p
+    end)
+end
+
+local function viewRandomPlayer()
+    local p = getRandomTarget()
+    if p then
+        viewPlayer(p.Name)
+    end
+end
+
+local function unviewPlayer()
+    if not state.view.enabled then
+        return
+    end
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            safe_pcall(function()
+                Workspace.CurrentCamera.CameraSubject = hum
+            end)
+        end
+    end
+    state.view.enabled = false
+    state.view.targetPlayer = nil
+end
+
+local function sitPlayer()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        safe_pcall(function()
+            hum.Sit = true
+        end)
+    end
+end
+
 local function processCommandString(commandString)
     if not commandString then return end
-    local cmd, arg = commandString:match("^!?(%S+)%s*(.*)")
+    
+    local messageWithoutPrefix = commandString
+    local cmd, arg
+    
+    local e_match = commandString:match("^/[Ee]%s*(.*)")
+    if e_match then
+        messageWithoutPrefix = trim(e_match)
+    end
+    
+    local prefix_match = messageWithoutPrefix:match("^!+(.*)")
+    if prefix_match then
+        messageWithoutPrefix = trim(prefix_match)
+    end
+
+    cmd, arg = messageWithoutPrefix:match("^%s*(%S+)%s*(.*)")
+    
     if not cmd then return end
     local lc = string.lower(cmd)
+    local trimmedArg = trim(arg)
+    
+    local isKnownCommand = ({
+        bringparts=true, unbringparts=true, fly=true, unfly=true,
+        rejoin=true, serverhop=true, shop=true, respawn=true, re=true, refresh=true,
+        walkspeed=true, speed=true, jumppower=true, goto=true, to=true, noclip=true, clip=true,
+        infinitejump=true, infjump=true, spin=true, unspin=true,
+        view=true, unview=true, sit=true, unsit=true
+    })[lc]
+    
+    if not isKnownCommand then
+        return
+    end
+
+    if lc == "speed" then
+        lc = "walkspeed"
+    end
+    
+    if lc == "refresh" then
+        lc = "respawn"
+    end
+    
+    if lc == "shop" then
+        lc = "serverhop"
+    end
+    
+    if lc == "to" then
+        lc = "goto"
+    end
+    
+    if lc == "clip" then
+        lc = "noclip"
+    end
+
+
     if tryHandleShortcutCommands(lc, arg) then
         return
     end
+    
     if lc == "bringparts" then
-        if not arg or #trim(arg) == 0 then
-            local autoTarget = autoDetectTarget()
-            if autoTarget then
-                bringPartsCommand(autoTarget)
-            else
-                setStatus("Auto-detect found no target.", false)
+        if trimmedArg == "random" then
+            local randomTarget = getRandomTarget()
+            if randomTarget then
+                bringPartsCommand(randomTarget)
             end
-        else
+        elseif #trimmedArg > 0 then
             bringPartsCommand(arg)
+        else
+            bringPartsCommand(LocalPlayer)
         end
     elseif lc == "unbringparts" then
         unbringPartsCommand(arg)
@@ -1207,47 +1371,45 @@ local function processCommandString(commandString)
         disableNoclip()
     elseif lc == "infinitejump" or lc == "infjump" then
         toggleInfiniteJump(arg)
-    end
-end
-
-local function chatHandler(msg)
-    if not msg then return end
-    local emoteCmd = msg:match("^/e%s+(.*)")
-    if emoteCmd then
-        processCommandString(emoteCmd)
-        return
-    end
-    local hasBang = msg:match("^!")
-    if hasBang then
-        processCommandString(msg)
-        return
-    end
-    local maybeCmd = msg:match("^(%S+)%s*(.*)")
-    if maybeCmd then
-        local cmdCandidate, argCandidate = msg:match("^(%S+)%s*(.*)")
-        if cmdCandidate then
-            local lc = string.lower(cmdCandidate)
-            local known = {
-                bringparts=true, unbringparts=true, fly=true, unfly=true,
-                rejoin=true, serverhop=true, shop=true, respawn=true, re=true,
-                walkspeed=true, jumppower=true, goto=true, noclip=true, clip=true,
-                infinitejump=true, infjump=true, spin=true, unspin=true
-            }
-            if known[lc] then
-                processCommandString(msg)
-                return
-            end
+    elseif lc == "view" then
+        if trimmedArg == "random" then
+            viewRandomPlayer()
+        else
+            viewPlayer(arg)
         end
+    elseif lc == "unview" then
+        unviewPlayer()
+    elseif lc == "sit" then
+        sitPlayer()
+    elseif lc == "unsit" then
+        unsitPlayer()
+    elseif lc == "walkspeed" then
+        setWalkSpeed(arg)
+    elseif lc == "jumppower" then
+        setJumpPower(arg)
     end
 end
 
 if LocalPlayer then
-    state.chatConnection = LocalPlayer.Chatted:Connect(chatHandler)
+    if not state.chatConnection then
+        state.chatConnection = LocalPlayer.Chatted:Connect(function(message)
+            processCommandString(message)
+        end)
+    end
+    
+    if not UserInputService.TouchEnabled and not state.fly.toggleKeyConn then
+        state.fly.toggleKeyConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end 
+            
+            if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.E then
+                toggleFly() 
+            end
+        end)
+    end
 end
 
 state.playerRemovingConnection = Players.PlayerRemoving:Connect(function(plr)
     if state.player and plr == state.player then
-        setStatus("Target left game.", false)
         unbringPartsCommand()
     end
 end)
@@ -1273,5 +1435,15 @@ LocalPlayer.CharacterAdded:Connect(function(char)
         delay(0.1, function()
             enableSpin(state.spin.speed)
         end)
+    end
+    if state.view.enabled and state.view.targetPlayer and char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            delay(0.1, function()
+                safe_pcall(function()
+                    Workspace.CurrentCamera.CameraSubject = hum
+                end)
+            end)
+        end
     end
 end)
